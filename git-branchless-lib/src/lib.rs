@@ -11,5 +11,6 @@
 
 pub mod core;
 pub mod git;
+pub mod reverse_hex;
 pub mod testing;
 pub mod util;
