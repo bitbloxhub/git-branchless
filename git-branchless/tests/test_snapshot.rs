@@ -82,15 +82,16 @@ fn test_restore_snapshot_basic() -> eyre::Result<()> {
         let (stdout, stderr) =
             git.branchless("snapshot", &["restore", &snapshot_oid.to_string()])?;
         let stdout = trim_lines(stdout);
-        insta::assert_snapshot!(stderr, @r###"
+        insta::assert_snapshot!(stderr, @r"
         branchless: restoring from snapshot
-        branchless: processing 2 updates: branch master, ref HEAD
+        branchless: processing 1 update: branch master
         branchless: processing 1 update: ref HEAD
         HEAD is now at f7ec40d branchless: working copy snapshot data: 2 unstaged changes
         branchless: processing checkout
         branchless: processing 1 update: ref HEAD
         branchless: processing 1 update: branch master
-        "###);
+        branchless: processing 1 update: ref HEAD
+        ");
         insta::assert_snapshot!(stdout, @r###"
         branchless: running command: <git-executable> reset --hard HEAD --
         HEAD is now at 96d1c37 create test2.txt
@@ -192,15 +193,16 @@ fn test_restore_snapshot_deleted_files() -> eyre::Result<()> {
         let (stdout, stderr) =
             git.branchless("snapshot", &["restore", &snapshot_oid.to_string()])?;
         let stdout = trim_lines(stdout);
-        insta::assert_snapshot!(stderr, @r###"
+        insta::assert_snapshot!(stderr, @r"
         branchless: restoring from snapshot
-        branchless: processing 2 updates: branch master, ref HEAD
+        branchless: processing 1 update: branch master
         branchless: processing 1 update: ref HEAD
         HEAD is now at 1935fed branchless: working copy snapshot data: 2 unstaged changes
         branchless: processing checkout
         branchless: processing 1 update: ref HEAD
         branchless: processing 1 update: branch master
-        "###);
+        branchless: processing 1 update: ref HEAD
+        ");
         insta::assert_snapshot!(stdout, @r###"
         branchless: running command: <git-executable> reset --hard HEAD --
         HEAD is now at 96d1c37 create test2.txt
@@ -265,15 +267,16 @@ fn test_restore_snapshot_delete_file_only_in_index() -> eyre::Result<()> {
         let (stdout, stderr) =
             git.branchless("snapshot", &["restore", &snapshot_oid.to_string()])?;
         let stdout = trim_lines(stdout);
-        insta::assert_snapshot!(stderr, @r###"
+        insta::assert_snapshot!(stderr, @r"
         branchless: restoring from snapshot
-        branchless: processing 2 updates: branch master, ref HEAD
+        branchless: processing 1 update: branch master
         branchless: processing 1 update: ref HEAD
         HEAD is now at eb8b9ee branchless: working copy snapshot data: 1 unstaged change
         branchless: processing checkout
         branchless: processing 1 update: ref HEAD
         branchless: processing 1 update: branch master
-        "###);
+        branchless: processing 1 update: ref HEAD
+        ");
         insta::assert_snapshot!(stdout, @r###"
         branchless: running command: <git-executable> reset --hard HEAD --
         HEAD is now at 62fc20d create test1.txt

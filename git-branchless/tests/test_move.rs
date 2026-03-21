@@ -3257,12 +3257,13 @@ fn test_move_branches_after_move() -> eyre::Result<()> {
                 "move",
                 &["--in-memory", "-s", "foo", "-d", &test1_oid.to_string()],
             )?;
-            insta::assert_snapshot!(stderr, @r###"
+            insta::assert_snapshot!(stderr, @"
             branchless: creating working copy snapshot
             Previous HEAD position was f81d55c create test5.txt
+            branchless: processing 1 update: ref HEAD
             Switched to branch 'bar'
             branchless: processing checkout
-            "###);
+            ");
             insta::assert_snapshot!(stdout, @r###"
             Attempting rebase in-memory...
             [1/3] Committed as: 4838e49 create test3.txt
@@ -3464,7 +3465,7 @@ fn test_move_no_reapply_squashed_commits() -> eyre::Result<()> {
                 "move",
                 &["--on-disk", "-b", &test2_oid.to_string(), "-d", "master"],
             )?;
-            insta::assert_snapshot!(stderr, @r###"
+            insta::assert_snapshot!(stderr, @"
             branchless: processing 1 update: ref HEAD
             branchless: processing 1 update: ref HEAD
             Executing: git branchless hook-detect-empty-commit 62fc20d2a290daea0d52bdc2ed2ad4be6491010e
@@ -3474,12 +3475,13 @@ fn test_move_no_reapply_squashed_commits() -> eyre::Result<()> {
             branchless: processing 4 rewritten commits
             branchless: creating working copy snapshot
             branchless: running command: <git-executable> checkout master --
+            branchless: processing 1 update: ref HEAD
             Switched to branch 'master'
             branchless: processing checkout
             :
             @ de4a1fe (> master) squashed test1 and test2
             Successfully rebased and updated detached HEAD.
-            "###);
+            ");
             insta::assert_snapshot!(stdout, @r###"
             hint: you can omit the --dest flag in this case, as it defaults to HEAD
             hint: disable this hint by running: git config --global branchless.hint.moveImplicitHeadArgument false
@@ -3600,7 +3602,7 @@ fn test_move_delete_checked_out_branch() -> eyre::Result<()> {
             git.run(&["checkout", "work"])?;
             let (stdout, stderr) =
                 git.branchless("move", &["--on-disk", "-b", "HEAD", "-d", "master"])?;
-            insta::assert_snapshot!(stderr, @r###"
+            insta::assert_snapshot!(stderr, @"
             branchless: processing 1 update: ref HEAD
             Executing: git branchless hook-skip-upstream-applied-commit 62fc20d2a290daea0d52bdc2ed2ad4be6491010e
             Executing: git branchless hook-skip-upstream-applied-commit 96d1c37a3d4363611c49f7e52186e189a04c531f
@@ -3612,6 +3614,7 @@ fn test_move_delete_checked_out_branch() -> eyre::Result<()> {
             branchless: creating working copy snapshot
             branchless: running command: <git-executable> checkout master --
             Previous HEAD position was 012efd6 create test3.txt
+            branchless: processing 1 update: ref HEAD
             Switched to branch 'master'
             branchless: processing checkout
             :
@@ -3619,7 +3622,7 @@ fn test_move_delete_checked_out_branch() -> eyre::Result<()> {
             |
             o 012efd6 (more-work) create test3.txt
             Successfully rebased and updated detached HEAD.
-            "###);
+            ");
             insta::assert_snapshot!(stdout, @r###"
             branchless: running command: <git-executable> diff --quiet
             Calling Git for on-disk rebase...
@@ -4336,7 +4339,7 @@ fn test_move_orphaned_root() -> eyre::Result<()> {
 
         {
             let (stdout, stderr) = git.branchless("move", &["--on-disk", "-d", "master"])?;
-            insta::assert_snapshot!(stderr, @r###"
+            insta::assert_snapshot!(stderr, @"
             branchless: processing 1 update: ref HEAD
             branchless: processing 1 update: ref HEAD
             Executing: git branchless hook-detect-empty-commit da90168b4835f97f1a10bcc12833140056df9157
@@ -4347,6 +4350,7 @@ fn test_move_orphaned_root() -> eyre::Result<()> {
             branchless: processing 1 update: branch new-root
             branchless: creating working copy snapshot
             branchless: running command: <git-executable> checkout new-root --
+            branchless: processing 1 update: ref HEAD
             Switched to branch 'new-root'
             branchless: processing checkout
             :
@@ -4354,7 +4358,7 @@ fn test_move_orphaned_root() -> eyre::Result<()> {
             |
             @ 70deb1e (> new-root) create test3.txt
             Successfully rebased and updated detached HEAD.
-            "###);
+            ");
             insta::assert_snapshot!(stdout, @r###"
             branchless: running command: <git-executable> diff --quiet
             Calling Git for on-disk rebase...
@@ -4646,7 +4650,7 @@ fn test_move_branch_on_merge_conflict_resolution() -> eyre::Result<()> {
 
     {
         let (stdout, stderr) = git.run(&["rebase", "--continue"])?;
-        insta::assert_snapshot!(stderr, @r###"
+        insta::assert_snapshot!(stderr, @r"
         branchless: processing 1 update: ref HEAD
         Executing: git branchless hook-detect-empty-commit aec59174640c3e3dbb92fdade0bc44ca31552a85
         Executing: git branchless hook-register-extra-post-rewrite-hook
@@ -4654,6 +4658,7 @@ fn test_move_branch_on_merge_conflict_resolution() -> eyre::Result<()> {
         branchless: creating working copy snapshot
         branchless: running command: <git-executable> checkout master --
         Previous HEAD position was 3632ef4 create test1.txt
+        branchless: processing 1 update: ref HEAD
         Switched to branch 'master'
         branchless: processing checkout
         :
@@ -4663,7 +4668,7 @@ fn test_move_branch_on_merge_conflict_resolution() -> eyre::Result<()> {
         |
         o 3632ef4 create test1.txt
         Successfully rebased and updated detached HEAD.
-        "###);
+        ");
         insta::assert_snapshot!(stdout, @r###"
         [detached HEAD 3632ef4] create test1.txt
          1 file changed, 1 insertion(+), 1 deletion(-)
