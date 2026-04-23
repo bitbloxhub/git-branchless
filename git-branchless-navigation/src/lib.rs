@@ -34,10 +34,10 @@ use lib::core::effects::Effects;
 use lib::core::eventlog::{EventLogDb, EventReplayer};
 use lib::core::formatting::Pluralize;
 use lib::core::node_descriptors::{
-    BranchesDescriptor, CommitMessageDescriptor, CommitOidDescriptor,
+    BranchesDescriptor, ChangeIdDescriptor, CommitMessageDescriptor, CommitOidDescriptor,
     DifferentialRevisionDescriptor, NodeDescriptor, Redactor, RelativeTimeDescriptor,
 };
-use lib::git::{GitRunInfo, NonZeroOid, Repo};
+use lib::git::{Commit, GitRunInfo, NonZeroOid, Repo};
 
 use crate::prompt::prompt_select_commit;
 
@@ -370,7 +370,7 @@ pub fn traverse_commits(
     )?;
     let event_replayer = EventReplayer::from_event_log_db(effects, &repo, &event_log_db)?;
     let event_cursor = event_replayer.make_default_cursor();
-    let dag = Dag::open_and_sync(
+    let mut dag = Dag::open_and_sync(
         effects,
         &repo,
         &event_replayer,
@@ -384,6 +384,17 @@ pub fn traverse_commits(
             eyre::bail!("No HEAD present; cannot calculate next commit");
         }
     };
+    let commits = resolve_default_smartlog_commits(effects, &repo, &mut dag)?;
+    let graph = make_smartlog_graph(
+        effects,
+        &repo,
+        &dag,
+        &event_replayer,
+        event_cursor,
+        &commits,
+        false,
+    )?;
+    let graph_commits = graph.get_commits();
 
     let current_oid = advance(
         effects,
@@ -391,6 +402,7 @@ pub fn traverse_commits(
         &dag,
         &mut [
             &mut CommitOidDescriptor::new(true)?,
+            &mut ChangeIdDescriptor::new(&repo, &Redactor::Disabled, &graph_commits)?,
             &mut RelativeTimeDescriptor::new(&repo, SystemTime::now())?,
             &mut BranchesDescriptor::new(
                 &repo,
@@ -470,6 +482,37 @@ pub fn traverse_commits(
     )
 }
 
+fn find_change_id_prefix_matches(
+    commits: &[Commit<'_>],
+    change_id_prefix: &str,
+) -> eyre::Result<Vec<NonZeroOid>> {
+    let change_id_prefix = change_id_prefix.to_ascii_lowercase();
+    let mut matching_oids = Vec::new();
+    for commit in commits {
+        let change_id =
+            commit
+                .get_custom_headers()?
+                .into_iter()
+                .find_map(|(header_name, header_value)| {
+                    if header_name.eq_ignore_ascii_case("change-id") {
+                        Some(header_value)
+                    } else {
+                        None
+                    }
+                });
+        let Some(change_id) = change_id else {
+            continue;
+        };
+        if change_id
+            .to_ascii_lowercase()
+            .starts_with(&change_id_prefix)
+        {
+            matching_oids.push(commit.get_oid());
+        }
+    }
+    Ok(matching_oids)
+}
+
 /// Interactively switch to a commit from the smartlog.
 pub fn switch(
     effects: &Effects,
@@ -512,11 +555,15 @@ pub fn switch(
         &commits,
         false,
     )?;
+    let graph_commits = graph.get_commits();
 
     enum Target {
         /// The (possibly empty) target expression should be used as the initial
         /// query in the commit selector.
         Interactive(String),
+
+        /// Switch directly to this commit OID.
+        Oid(NonZeroOid),
 
         /// The target expression is probably a git revision or reference and
         /// should be passed directly to git for resolution.
@@ -531,22 +578,31 @@ pub fn switch(
     let initial_query = match (interactive, target) {
         (true, Some(target)) => Target::Interactive(target.to_string()),
         (true, None) => Target::Interactive(String::new()),
-        (false, Some(target)) => match repo.revparse_single_commit(target.to_string().as_ref()) {
-            Ok(Some(_)) => Target::Passthrough(target.to_string()),
-            Ok(None) | Err(_) => Target::Revset(target.clone()),
-        },
+        (false, Some(target)) => {
+            let target_string = target.to_string();
+            let change_id_matches = find_change_id_prefix_matches(&graph_commits, &target_string)?;
+            match change_id_matches.as_slice() {
+                [oid] => Target::Oid(*oid),
+                [] | [_, _, ..] => match repo.revparse_single_commit(target_string.as_ref()) {
+                    Ok(Some(_)) => Target::Passthrough(target_string),
+                    Ok(None) | Err(_) => Target::Revset(target.clone()),
+                },
+            }
+        }
         (false, None) => Target::None,
     };
     let target: Option<CheckoutTarget> = match initial_query {
         Target::None => None,
+        Target::Oid(oid) => Some(CheckoutTarget::Oid(oid)),
         Target::Passthrough(target) => Some(CheckoutTarget::Unknown(target)),
         Target::Interactive(initial_query) => {
             match prompt_select_commit(
                 None,
                 &initial_query,
-                graph.get_commits(),
+                graph_commits.clone(),
                 &mut [
                     &mut CommitOidDescriptor::new(true)?,
+                    &mut ChangeIdDescriptor::new(&repo, &Redactor::Disabled, &graph_commits)?,
                     &mut RelativeTimeDescriptor::new(&repo, SystemTime::now())?,
                     &mut BranchesDescriptor::new(
                         &repo,
@@ -570,7 +626,6 @@ pub fn switch(
                 std::slice::from_ref(&target),
                 &ResolveRevsetOptions::default(),
             )?;
-
             let commit_set = union_all(&commit_sets);
             let commit_set = dag.query_heads(commit_set)?;
             let commits = sorted_commit_set(&repo, &dag, &commit_set)?;

@@ -18,8 +18,10 @@ git-branchless-opts = { workspace = true }
 git-branchless-reword = { workspace = true }
 itertools = { workspace = true }
 lib = { workspace = true }
+rand = { workspace = true }
 rayon = { workspace = true }
 scm-record = { workspace = true }
+tempfile = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

@@ -8,15 +8,16 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use bstr::{ByteSlice, ByteVec};
-use cursive::theme::BaseColor;
+use cursive::theme::{BaseColor, Effect};
 use cursive::utils::markup::StyledString;
 use lazy_static::lazy_static;
 use regex::Regex;
 use tracing::instrument;
 
 use crate::core::config::{
-    get_commit_descriptors_branches, get_commit_descriptors_differential_revision,
-    get_commit_descriptors_relative_time,
+    get_commit_descriptors_branches, get_commit_descriptors_change_id,
+    get_commit_descriptors_change_id_display_length, get_commit_descriptors_change_id_min_length,
+    get_commit_descriptors_differential_revision, get_commit_descriptors_relative_time,
 };
 use crate::git::{
     CategorizedReferenceName, Commit, NonZeroOid, ReferenceName, Repo, ResolvedReferenceInfo,
@@ -377,6 +378,144 @@ impl NodeDescriptor for BranchesDescriptor<'_> {
     }
 }
 
+/// Display the commit's Jujutsu-compatible `change-id` header.
+#[derive(Debug)]
+pub struct ChangeIdDescriptor<'a> {
+    is_enabled: bool,
+    display_length: usize,
+    change_ids_by_oid: HashMap<NonZeroOid, String>,
+    unique_prefixes_by_oid: HashMap<NonZeroOid, String>,
+    redactor: &'a Redactor,
+}
+
+impl<'a> ChangeIdDescriptor<'a> {
+    /// Constructor.
+    pub fn new(repo: &Repo, redactor: &'a Redactor, commits: &[Commit<'_>]) -> eyre::Result<Self> {
+        let is_enabled = get_commit_descriptors_change_id(repo)?;
+        let min_length = get_commit_descriptors_change_id_min_length(repo)?;
+        let display_length = get_commit_descriptors_change_id_display_length(repo)?;
+        let (change_ids_by_oid, unique_prefixes_by_oid) = if is_enabled {
+            build_change_id_prefixes(commits, min_length)?
+        } else {
+            (HashMap::new(), HashMap::new())
+        };
+        Ok(ChangeIdDescriptor {
+            is_enabled,
+            display_length,
+            change_ids_by_oid,
+            unique_prefixes_by_oid,
+            redactor,
+        })
+    }
+}
+
+fn extract_change_id(commit: &Commit<'_>) -> eyre::Result<Option<String>> {
+    let custom_headers = commit.get_custom_headers()?;
+    let change_id = custom_headers
+        .into_iter()
+        .find_map(|(header_name, header_value)| {
+            if header_name.eq_ignore_ascii_case("change-id") {
+                Some(header_value)
+            } else {
+                None
+            }
+        });
+    Ok(change_id)
+}
+
+fn compute_shortest_change_id_prefix(
+    all_change_ids: &[String],
+    current_change_id: &str,
+    min_length: usize,
+) -> String {
+    if current_change_id.is_empty() {
+        return String::new();
+    }
+
+    let start_length = std::cmp::max(1, std::cmp::min(min_length, current_change_id.len()));
+    for prefix_length in start_length..=current_change_id.len() {
+        let prefix = &current_change_id[..prefix_length];
+        let num_matches = all_change_ids
+            .iter()
+            .filter(|other_change_id| other_change_id.starts_with(prefix))
+            .count();
+        if num_matches == 1 {
+            return prefix.to_string();
+        }
+    }
+
+    current_change_id.to_string()
+}
+
+fn build_change_id_prefixes(
+    commits: &[Commit<'_>],
+    min_length: usize,
+) -> eyre::Result<(HashMap<NonZeroOid, String>, HashMap<NonZeroOid, String>)> {
+    let mut change_ids_by_oid = Vec::new();
+    for commit in commits {
+        if let Some(change_id) = extract_change_id(commit)? {
+            change_ids_by_oid.push((commit.get_oid(), change_id));
+        }
+    }
+
+    let all_change_ids: Vec<String> = change_ids_by_oid
+        .iter()
+        .map(|(_oid, change_id)| change_id.clone())
+        .collect();
+    let unique_prefixes_by_oid = change_ids_by_oid
+        .iter()
+        .map(|(oid, change_id)| {
+            (
+                *oid,
+                compute_shortest_change_id_prefix(&all_change_ids, change_id, min_length),
+            )
+        })
+        .collect();
+    let change_ids_by_oid = change_ids_by_oid.into_iter().collect();
+    Ok((change_ids_by_oid, unique_prefixes_by_oid))
+}
+
+impl NodeDescriptor for ChangeIdDescriptor<'_> {
+    #[instrument]
+    fn describe_node(
+        &mut self,
+        _glyphs: &Glyphs,
+        object: &NodeObject,
+    ) -> eyre::Result<Option<StyledString>> {
+        if !self.is_enabled {
+            return Ok(None);
+        }
+        match self.redactor {
+            Redactor::Enabled { .. } => return Ok(None),
+            Redactor::Disabled => {}
+        }
+        let commit = match object {
+            NodeObject::Commit { commit } => commit,
+            NodeObject::GarbageCollected { oid: _ } => return Ok(None),
+        };
+        let change_id = match self.change_ids_by_oid.get(&commit.get_oid()) {
+            Some(change_id) => change_id,
+            None => return Ok(None),
+        };
+        let unique_prefix = match self.unique_prefixes_by_oid.get(&commit.get_oid()) {
+            Some(unique_prefix) => unique_prefix,
+            None => return Ok(None),
+        };
+
+        let unique_length = unique_prefix.len();
+        let display_length = std::cmp::max(unique_length, self.display_length);
+        let display_length = std::cmp::min(display_length, change_id.len());
+        let shown_change_id = &change_id[..display_length];
+        let unique_length = std::cmp::min(unique_length, shown_change_id.len());
+        let (unique_part, remaining_part) = shown_change_id.split_at(unique_length);
+        let result = StyledStringBuilder::new()
+            .append_styled(unique_part, BaseColor::Magenta.light())
+            .append_styled(remaining_part, Effect::Dim)
+            .build();
+        Ok(Some(result))
+    }
+}
+
 /// Display the associated Phabricator revision for a given commit.
 #[derive(Debug)]
 pub struct DifferentialRevisionDescriptor<'a> {
@@ -576,5 +715,48 @@ Differential Revision: phabricator.com/D123";
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn test_compute_shortest_change_id_prefix() {
+        let all_change_ids = vec![
+            "abc123".to_string(),
+            "abd456".to_string(),
+            "zzz999".to_string(),
+        ];
+        assert_eq!(
+            compute_shortest_change_id_prefix(&all_change_ids, "abc123", 1),
+            "abc"
+        );
+        assert_eq!(
+            compute_shortest_change_id_prefix(&all_change_ids, "abd456", 1),
+            "abd"
+        );
+        assert_eq!(
+            compute_shortest_change_id_prefix(&all_change_ids, "zzz999", 1),
+            "z"
+        );
+    }
+
+    #[test]
+    fn test_compute_shortest_change_id_prefix_with_duplicates() {
+        let all_change_ids = vec!["aaaa".to_string(), "aaaa".to_string()];
+        assert_eq!(
+            compute_shortest_change_id_prefix(&all_change_ids, "aaaa", 1),
+            "aaaa"
+        );
+    }
+
+    #[test]
+    fn test_compute_shortest_change_id_prefix_respects_min_length() {
+        let all_change_ids = vec![
+            "abc123".to_string(),
+            "def456".to_string(),
+            "ghi789".to_string(),
+        ];
+        assert_eq!(
+            compute_shortest_change_id_prefix(&all_change_ids, "abc123", 4),
+            "abc1"
+        );
     }
 }

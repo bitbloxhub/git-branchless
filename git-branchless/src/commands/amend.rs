@@ -174,11 +174,13 @@ pub fn amend(
     };
 
     let amended_commit_oid = head_commit.amend_commit(
+        &repo,
         None,
         Some(&author),
         Some(&committer),
         None,
         Some(&amended_tree),
+        None,
     )?;
 
     // Switch to the new commit and move any branches. This is kind of a hack:
@@ -290,6 +292,7 @@ pub fn amend(
                     descendant_message,
                     &descendant_commit.get_tree()?,
                     parents.iter().collect(),
+                    None,
                 )?;
                 builder.replace_commit(descendant_oid, reparented_descendant_oid)?;
             }

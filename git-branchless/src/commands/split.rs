@@ -320,9 +320,10 @@ pub fn split(
             format!("temp(split): {message}").as_str(),
             &remainder_tree,
             parent_commits.iter().collect(),
+            None,
         )?
     } else {
-        target_commit.amend_commit(None, None, None, None, Some(&remainder_tree))?
+        target_commit.amend_commit(&repo, None, None, None, None, Some(&remainder_tree), None)?
     };
     let remainder_commit = repo.find_commit_or_fail(remainder_commit_oid)?;
 
@@ -366,6 +367,7 @@ pub fn split(
                 } else {
                     vec![&remainder_commit]
                 },
+                None,
             )?;
 
             // see git-branchless/src/commands/amend.rs:172

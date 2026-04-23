@@ -237,6 +237,33 @@ pub fn get_commit_descriptors_branches(repo: &Repo) -> eyre::Result<bool> {
         .get_or("branchless.commitDescriptors.branches", true)
 }
 
+/// If `true`, show Jujutsu-compatible `change-id` values in the smartlog.
+#[instrument]
+pub fn get_commit_descriptors_change_id(repo: &Repo) -> eyre::Result<bool> {
+    repo.get_readonly_config()?
+        .get_or("branchless.commitDescriptors.changeId", true)
+}
+
+/// Minimum length to use when abbreviating `change-id` values.
+#[instrument]
+pub fn get_commit_descriptors_change_id_min_length(repo: &Repo) -> eyre::Result<usize> {
+    let min_length: i32 = repo
+        .get_readonly_config()?
+        .get_or("branchless.commitDescriptors.changeIdMinLength", 1)?;
+    let min_length = std::cmp::max(min_length, 1);
+    Ok(min_length.try_into().unwrap_or(1))
+}
+
+/// Preferred number of characters to display for abbreviated `change-id` values.
+#[instrument]
+pub fn get_commit_descriptors_change_id_display_length(repo: &Repo) -> eyre::Result<usize> {
+    let display_length: i32 = repo
+        .get_readonly_config()?
+        .get_or("branchless.commitDescriptors.changeIdDisplayLength", 8)?;
+    let display_length = std::cmp::max(display_length, 1);
+    Ok(display_length.try_into().unwrap_or(8))
+}
+
 /// If `true`, show associated Phabricator commits in the smartlog.
 #[instrument]
 pub fn get_commit_descriptors_differential_revision(repo: &Repo) -> eyre::Result<bool> {

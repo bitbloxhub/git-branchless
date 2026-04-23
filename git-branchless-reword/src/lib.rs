@@ -256,7 +256,7 @@ pub fn reword(
             let message = messages.get(&commit.get_oid()).unwrap();
             // This looks funny, but just means "leave everything but the message as is"
             let replacement_oid =
-                commit.amend_commit(None, None, None, Some(message.as_str()), None)?;
+                commit.amend_commit(&repo, None, None, None, Some(message.as_str()), None, None)?;
             builder.move_subtree(commit.get_oid(), commit.get_parent_oids())?;
             builder.replace_commit(commit.get_oid(), replacement_oid)?;
         }

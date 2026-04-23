@@ -32,7 +32,7 @@ use lib::core::effects::Effects;
 use lib::core::eventlog::{EventLogDb, EventReplayer};
 use lib::core::formatting::Pluralize;
 use lib::core::node_descriptors::{
-    BranchesDescriptor, CommitMessageDescriptor, CommitOidDescriptor,
+    BranchesDescriptor, ChangeIdDescriptor, CommitMessageDescriptor, CommitOidDescriptor,
     DifferentialRevisionDescriptor, ObsolescenceExplanationDescriptor, Redactor,
     RelativeTimeDescriptor,
 };
@@ -835,6 +835,7 @@ pub fn smartlog(
         get_smartlog_reverse(&repo)?
     };
 
+    let graph_commits = graph.get_commits();
     let mut lines = render_graph(
         &effects.reverse_order(reverse),
         &repo,
@@ -843,6 +844,7 @@ pub fn smartlog(
         references_snapshot.head_oid,
         &mut [
             &mut CommitOidDescriptor::new(true)?,
+            &mut ChangeIdDescriptor::new(&repo, &Redactor::Disabled, &graph_commits)?,
             &mut RelativeTimeDescriptor::new(&repo, SystemTime::now())?,
             &mut ObsolescenceExplanationDescriptor::new(
                 &event_replayer,

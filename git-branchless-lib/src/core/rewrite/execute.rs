@@ -677,6 +677,7 @@ mod in_memory {
                                 commit_message,
                                 &commit_tree,
                                 vec![&current_commit],
+                                Some(original_commit.get_custom_headers().unwrap()),
                             )
                             .wrap_err("Applying rebased commit")?,
                         );
@@ -809,6 +810,7 @@ mod in_memory {
                             replacement_commit_message,
                             &replacement_tree,
                             parents.iter().collect(),
+                            Some(original_commit.get_custom_headers().unwrap()),
                         )
                         .wrap_err("Applying rebased commit")?;
 

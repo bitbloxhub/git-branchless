@@ -11,6 +11,7 @@
 
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write;
 use std::num::TryFromIntError;
 use std::ops::Add;
 use std::path::{Path, PathBuf};
@@ -22,7 +23,7 @@ use bstr::ByteVec;
 use chrono::{DateTime, Utc};
 use cursive::theme::BaseColor;
 use cursive::utils::markup::StyledString;
-use git2::DiffOptions;
+use git2::{DiffOptions, ObjectType};
 use itertools::Itertools;
 use thiserror::Error;
 use tracing::{instrument, warn};
@@ -1259,21 +1260,43 @@ impl Repo {
         message: &str,
         tree: &Tree,
         parents: Vec<&Commit>,
+        extra_headers: Option<Vec<(String, String)>>,
     ) -> Result<NonZeroOid> {
         let parents = parents
             .iter()
             .map(|commit| &commit.inner)
             .collect::<Vec<_>>();
+        let mut buf = String::new();
+        writeln!(buf, "tree {}", tree.get_oid().to_string()).ok();
+        for parent in parents.iter() {
+            writeln!(buf, "parent {}", parent.id().to_string()).ok();
+        }
+        writeln!(
+            buf,
+            "author {} <{}> {}",
+            author.get_name().unwrap_or(""),
+            author.get_email().unwrap_or(""),
+            author.get_time().to_commit_fmt(),
+        )
+        .ok();
+        writeln!(
+            buf,
+            "committer {} <{}> {}",
+            committer.get_name().unwrap_or(""),
+            committer.get_email().unwrap_or(""),
+            committer.get_time().to_commit_fmt(),
+        )
+        .ok();
+        for header in extra_headers.unwrap_or(vec![]).iter() {
+            writeln!(buf, "{} {}", header.0, header.1).ok();
+        }
+        writeln!(buf).ok();
+        write!(buf, "{}", message).ok();
         let oid = self
             .inner
-            .commit(
-                update_ref,
-                &author.inner,
-                &committer.inner,
-                message,
-                &tree.inner,
-                parents.as_slice(),
-            )
+            .odb()
+            .map_err(Error::CreateCommit)?
+            .write(ObjectType::Commit, buf.as_bytes())
             .map_err(Error::CreateCommit)?;
         Ok(make_non_zero_oid(oid))
     }
@@ -1468,6 +1491,7 @@ impl Repo {
             &message,
             &dehydrated_tree,
             parents.iter().collect_vec(),
+            None,
         )?;
         let dehydrated_commit = self.find_commit_or_fail(dehydrated_commit_oid)?;
         Ok(dehydrated_commit)
@@ -1632,6 +1656,67 @@ impl Repo {
 
         Ok(amended_tree)
     }
+
+    /// Get the default signature
+    #[instrument]
+    pub fn signature(&self) -> Signature<'_> {
+        return Signature {
+            inner: self.inner.signature().unwrap(),
+        };
+    }
+
+    /// Get the default author signature
+    #[instrument]
+    pub fn author_signature(&self) -> Signature<'_> {
+        let default_git2 = self.inner.signature().unwrap();
+        let author_name =
+            std::env::var("GIT_AUTHOR_NAME").unwrap_or(default_git2.name().unwrap().to_string());
+        let author_email =
+            std::env::var("GIT_AUTHOR_EMAIL").unwrap_or(default_git2.email().unwrap().to_string());
+        let default_git2_date = Time {
+            inner: default_git2.when(),
+        }
+        .to_commit_fmt();
+        let author_date_string = std::env::var("GIT_AUTHOR_DATE").unwrap_or(default_git2_date);
+        let author_date_chrono = DateTime::parse_from_rfc3339(author_date_string.as_str())
+            .or_else(|_| DateTime::parse_from_rfc2822(author_date_string.as_str()))
+            .unwrap();
+        let offset = author_date_chrono.timezone().local_minus_utc();
+        let inner = git2::Signature::new(
+            &author_name,
+            &author_email,
+            &git2::Time::new(author_date_chrono.timestamp(), offset),
+        )
+        .unwrap();
+        return Signature { inner: inner };
+    }
+
+    /// Get the default committer signature
+    #[instrument]
+    pub fn committer_signature(&self) -> Signature<'_> {
+        let default_git2 = self.inner.signature().unwrap();
+        let committer_name =
+            std::env::var("GIT_COMMITTER_NAME").unwrap_or(default_git2.name().unwrap().to_string());
+        let committer_email = std::env::var("GIT_COMMITTER_EMAIL")
+            .unwrap_or(default_git2.email().unwrap().to_string());
+        let default_git2_date = Time {
+            inner: default_git2.when(),
+        }
+        .to_commit_fmt();
+        let committer_date_string =
+            std::env::var("GIT_COMMITTER_DATE").unwrap_or(default_git2_date);
+        let committer_date_chrono = DateTime::parse_from_rfc3339(committer_date_string.as_str())
+            .or_else(|_| DateTime::parse_from_rfc2822(committer_date_string.as_str()))
+            .unwrap();
+        let offset = committer_date_chrono.timezone().local_minus_utc();
+        let inner = git2::Signature::new(
+            &committer_name,
+            &committer_email,
+            &git2::Time::new(committer_date_chrono.timestamp(), offset),
+        )
+        .unwrap();
+        return Signature { inner: inner };
+    }
 }
 
 /// The signature of a commit, identifying who it was made by and when it was made.
@@ -1743,5 +1828,18 @@ impl Time {
     /// Calculate the associated [`DateTime`].
     pub fn to_date_time(&self) -> Option<DateTime<Utc>> {
         DateTime::from_timestamp(self.inner.seconds(), 0)
+    }
+
+    /// Turn a this into a string like `1762894360 +0000`
+    pub fn to_commit_fmt(&self) -> String {
+        let offset_unsigned = self.inner.offset_minutes().unsigned_abs();
+        let hours_mins = (offset_unsigned / 60, offset_unsigned % 60);
+        return format!(
+            "{} {}{:0>2}{:0>2}",
+            self.inner.seconds(),
+            self.inner.sign(),
+            hours_mins.0,
+            hours_mins.1
+        );
     }
 }

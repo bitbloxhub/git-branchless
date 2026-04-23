@@ -2001,6 +2001,7 @@ fn apply_fixes(
                 commit_message,
                 &fixed_tree,
                 parents.iter().collect(),
+                Some(original_commit.get_custom_headers()?),
             )?;
             if original_commit_oid == fixed_commit_oid {
                 continue;

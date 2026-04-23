@@ -125,6 +125,89 @@ fn test_move_stick() -> eyre::Result<()> {
 }
 
 #[test]
+fn test_move_supports_change_id_prefixes_for_all_revset_flags() -> eyre::Result<()> {
+    let git = make_git()?;
+    git.init_repo()?;
+    git.detach_head()?;
+    git.run(&[
+        "config",
+        "branchless.core.create-jujutsu-change-ids",
+        "true",
+    ])?;
+
+    git.write_file_txt("test1", "contents 1\n")?;
+    git.branchless("record", &["-m", "create test1", "--untracked", "add"])?;
+    git.write_file_txt("test2", "contents 2\n")?;
+    git.branchless("record", &["-m", "create test2", "--untracked", "add"])?;
+    git.write_file_txt("test3", "contents 3\n")?;
+    git.branchless("record", &["-m", "create test3", "--untracked", "add"])?;
+
+    let repo = git.get_repo()?;
+    let source_oid = repo.get_head_info()?.oid.unwrap();
+    let base_oid = repo
+        .find_commit_or_fail(source_oid)?
+        .get_only_parent_oid()
+        .unwrap();
+    let dest_oid = repo
+        .find_commit_or_fail(base_oid)?
+        .get_only_parent_oid()
+        .unwrap();
+
+    let extract_change_id = |oid: lib::git::NonZeroOid| -> eyre::Result<String> {
+        let (stdout, _stderr) = git.run(&["cat-file", "-p", &oid.to_string()])?;
+        let change_id_line = stdout
+            .lines()
+            .find(|line| line.starts_with("change-id "))
+            .ok_or_else(|| eyre::eyre!("missing change-id header for commit {oid}"))?;
+        Ok(change_id_line.trim_start_matches("change-id ").to_string())
+    };
+
+    let source_change_id = extract_change_id(source_oid)?;
+    let base_change_id = extract_change_id(base_oid)?;
+    let dest_change_id = extract_change_id(dest_oid)?;
+
+    let unique_prefix = |target: &str, others: &[&str]| -> String {
+        for len in 1..=target.len() {
+            let prefix = &target[..len];
+            if others.iter().all(|other| !other.starts_with(prefix)) {
+                return prefix.to_string();
+            }
+        }
+        target.to_string()
+    };
+
+    let source_prefix = unique_prefix(&source_change_id, &[&base_change_id, &dest_change_id]);
+    let base_prefix = unique_prefix(&base_change_id, &[&source_change_id, &dest_change_id]);
+    let dest_prefix = unique_prefix(&dest_change_id, &[&source_change_id, &base_change_id]);
+
+    {
+        let git = git.duplicate_repo()?;
+        git.branchless(
+            "move",
+            &["--dry-run", "-s", &source_prefix, "-d", &dest_prefix],
+        )?;
+    }
+
+    {
+        let git = git.duplicate_repo()?;
+        git.branchless(
+            "move",
+            &["--dry-run", "-b", &base_prefix, "-d", &dest_prefix],
+        )?;
+    }
+
+    {
+        let git = git.duplicate_repo()?;
+        git.branchless(
+            "move",
+            &["--dry-run", "-x", &base_prefix, "-d", &dest_prefix],
+        )?;
+    }
+
+    Ok(())
+}
+
+#[test]
 fn test_move_insert_stick() -> eyre::Result<()> {
     let git = make_git()?;
 
@@ -3527,11 +3610,12 @@ fn test_move_no_reapply_squashed_commits() -> eyre::Result<()> {
                 "move",
                 &["--in-memory", "-b", &test2_oid.to_string(), "-d", "master"],
             )?;
-            insta::assert_snapshot!(stderr, @r###"
+            insta::assert_snapshot!(stderr, @r"
             branchless: creating working copy snapshot
+            branchless: processing 1 update: ref HEAD
             Switched to branch 'master'
             branchless: processing checkout
-            "###);
+            ");
             insta::assert_snapshot!(stdout, @r###"
             hint: you can omit the --dest flag in this case, as it defaults to HEAD
             hint: disable this hint by running: git config --global branchless.hint.moveImplicitHeadArgument false
@@ -3648,12 +3732,13 @@ fn test_move_delete_checked_out_branch() -> eyre::Result<()> {
             git.run(&["checkout", "work"])?;
             let (stdout, stderr) =
                 git.branchless("move", &["--in-memory", "-b", "HEAD", "-d", "master"])?;
-            insta::assert_snapshot!(stderr, @r###"
+            insta::assert_snapshot!(stderr, @r"
             branchless: creating working copy snapshot
             Previous HEAD position was 96d1c37 create test2.txt
+            branchless: processing 1 update: ref HEAD
             Switched to branch 'master'
             branchless: processing checkout
-            "###);
+            ");
             insta::assert_snapshot!(stdout, @r###"
             Attempting rebase in-memory...
             [1/3] Skipped commit (was already applied upstream): 62fc20d create test1.txt
@@ -4387,12 +4472,13 @@ fn test_move_orphaned_root() -> eyre::Result<()> {
     {
         {
             let (stdout, stderr) = git.branchless("move", &["--in-memory", "-d", "master"])?;
-            insta::assert_snapshot!(stderr, @r###"
+            insta::assert_snapshot!(stderr, @r"
             branchless: creating working copy snapshot
             Previous HEAD position was fc09f3d create test3.txt
+            branchless: processing 1 update: ref HEAD
             Switched to branch 'new-root'
             branchless: processing checkout
-            "###);
+            ");
             insta::assert_snapshot!(stdout, @r###"
             Attempting rebase in-memory...
             [1/2] Skipped now-empty commit: 270b681 new root

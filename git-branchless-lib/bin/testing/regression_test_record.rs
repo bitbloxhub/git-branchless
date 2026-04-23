@@ -81,6 +81,7 @@ fn assert_trees_equal(
             &message,
             &actual_tree,
             parents.iter().collect(),
+            None,
         )?;
         repo.find_commit_or_fail(actual_oid)?
     };
