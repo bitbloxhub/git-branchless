@@ -4001,6 +4001,37 @@ fn test_move_merge_commit() -> eyre::Result<()> {
 }
 
 #[test]
+fn test_move_fixup_with_merge_commit_on_disk() -> eyre::Result<()> {
+    let git = make_git()?;
+
+    if !git.supports_reference_transactions()? {
+        return Ok(());
+    }
+    git.init_repo()?;
+
+    git.commit_file("test1", 1)?;
+    git.run(&["checkout", "HEAD^"])?;
+    let test2_oid = git.commit_file("test2", 2)?;
+    git.run(&["checkout", "HEAD^"])?;
+    git.commit_file("test3", 3)?;
+    git.run(&["merge", &test2_oid.to_string()])?;
+
+    let (_stdout, _stderr) = git.branchless(
+        "move",
+        &[
+            "--merge",
+            "--fixup",
+            "-s",
+            &test2_oid.to_string(),
+            "-d",
+            "master",
+        ],
+    )?;
+
+    Ok(())
+}
+
+#[test]
 fn test_move_merge_commit_both_parents() -> eyre::Result<()> {
     let git = make_git()?;
 
