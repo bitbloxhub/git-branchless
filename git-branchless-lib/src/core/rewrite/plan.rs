@@ -1196,7 +1196,11 @@ impl<'a> RebasePlanBuilder<'a> {
                 ),
             };
 
-            let first_parent_oid = *parent_oids.first().unwrap();
+            let Some(first_parent_oid) = parent_oids.first().copied() else {
+                eyre::bail!(
+                    "Cannot fix up into a root commit (no parents): {child_oid}. Choose a non-root destination commit."
+                )
+            };
             first_dest_oid.get_or_insert(first_parent_oid);
             acc.push(RebaseCommand::Reset {
                 target: OidOrLabel::Oid(first_parent_oid),
