@@ -818,6 +818,12 @@ impl<'a> RebasePlanBuilder<'a> {
                                 .parent_labels
                                 .get(&parent_oid)
                                 .map(|parent_label| OidOrLabel::Label(parent_label.clone()))
+                        } else if let Some(replacement_parent_oid) =
+                            self.replacement_commits.get(&parent_oid)
+                        {
+                            // Parent is not being rebased by this plan, but it has
+                            // a known replacement OID.
+                            Some(OidOrLabel::Oid(*replacement_parent_oid))
                         } else {
                             // This parent commit was not supposed to be
                             // rebased, so its OID won't change and we can
