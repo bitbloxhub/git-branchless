@@ -23,7 +23,7 @@ use rayon::ThreadPoolBuilder;
 use tracing::instrument;
 
 use git_branchless_opts::{MoveOptions, ResolveRevsetOptions, Revset};
-use git_branchless_revset::resolve_commits;
+use git_branchless_revset::{resolve_commits, resolve_default_smartlog_commits};
 use lib::core::config::{
     Hint, get_hint_enabled, get_hint_string, get_restack_preserve_timestamps,
     print_hint_suppression_notice,
@@ -60,6 +60,104 @@ fn resolve_base_commit(
         Some(base) => NonZeroOid::try_from(base),
         None => Ok(oid),
     }
+}
+
+fn expand_fixup_component_to_dest(
+    dag: &Dag,
+    component_root: NonZeroOid,
+    component: &CommitSet,
+    dest_oid: NonZeroOid,
+) -> eyre::Result<CommitSet> {
+    let mut expanded = component.clone();
+    let mut cursor = component_root;
+    loop {
+        let parents = dag.query_parents(CommitSet::from(cursor))?;
+        let Some(parent_vertex) = dag.set_first(&parents)? else {
+            break;
+        };
+        let parent_oid = NonZeroOid::try_from(parent_vertex)?;
+        if dag.query_is_ancestor(parent_oid, dest_oid)? {
+            break;
+        }
+        let parent_parents = dag.query_parents(CommitSet::from(parent_oid))?;
+        if dag.set_count(&parent_parents)? > 1 {
+            break;
+        }
+        if dag.set_contains(&expanded, parent_oid)? {
+            break;
+        }
+        expanded = expanded.union(&CommitSet::from(parent_oid));
+        cursor = parent_oid;
+    }
+    Ok(expanded)
+}
+
+fn extract_change_id(commit: &lib::git::Commit<'_>) -> eyre::Result<Option<String>> {
+    let custom_headers = commit.get_custom_headers()?;
+    let change_id = custom_headers
+        .into_iter()
+        .find_map(|(header_name, header_value)| {
+            if header_name.eq_ignore_ascii_case("change-id") {
+                Some(header_value)
+            } else {
+                None
+            }
+        });
+    Ok(change_id)
+}
+
+fn collect_default_smartlog_change_ids(
+    effects: &Effects,
+    repo: &Repo,
+    dag: &mut Dag,
+) -> eyre::Result<Vec<(NonZeroOid, String)>> {
+    let commits = resolve_default_smartlog_commits(effects, repo, dag)?;
+    let commits = sorted_commit_set(repo, dag, &commits)?;
+    let mut result = Vec::new();
+    for commit in commits {
+        if let Some(change_id) = extract_change_id(&commit)? {
+            result.push((commit.get_oid(), change_id));
+        }
+    }
+    Ok(result)
+}
+
+fn rewrite_revset_from_change_id_prefix(
+    repo: &Repo,
+    smartlog_change_ids: &[(NonZeroOid, String)],
+    revset: &Revset,
+) -> eyre::Result<Revset> {
+    let Revset(expr) = revset;
+    if let Ok(Some(_)) = repo.revparse_single_commit(expr.as_ref()) {
+        return Ok(revset.clone());
+    }
+
+    let expr = expr.to_ascii_lowercase();
+    let matches: Vec<NonZeroOid> = smartlog_change_ids
+        .iter()
+        .filter_map(|(oid, change_id)| {
+            if change_id.to_ascii_lowercase().starts_with(&expr) {
+                Some(*oid)
+            } else {
+                None
+            }
+        })
+        .collect();
+    match matches.as_slice() {
+        [oid] => Ok(Revset(oid.to_string())),
+        [] | [_, _, ..] => Ok(revset.clone()),
+    }
+}
+
+fn rewrite_revsets_from_change_id_prefixes(
+    repo: &Repo,
+    smartlog_change_ids: &[(NonZeroOid, String)],
+    revsets: &[Revset],
+) -> eyre::Result<Vec<Revset>> {
+    revsets
+        .iter()
+        .map(|revset| rewrite_revset_from_change_id_prefix(repo, smartlog_change_ids, revset))
+        .collect()
 }
 
 /// Move a subtree from one place to another.
@@ -113,6 +211,11 @@ pub fn r#move(
         &references_snapshot,
     )?;
 
+    let smartlog_change_ids = collect_default_smartlog_change_ids(effects, &repo, &mut dag)?;
+    let sources = rewrite_revsets_from_change_id_prefixes(&repo, &smartlog_change_ids, &sources)?;
+    let bases = rewrite_revsets_from_change_id_prefixes(&repo, &smartlog_change_ids, &bases)?;
+    let exacts = rewrite_revsets_from_change_id_prefixes(&repo, &smartlog_change_ids, &exacts)?;
+    let dest = rewrite_revset_from_change_id_prefix(&repo, &smartlog_change_ids, &dest)?;
     let source_oids: CommitSet =
         match resolve_commits(effects, &repo, &mut dag, &sources, resolve_revset_options) {
             Ok(commit_sets) => union_all(&commit_sets),
@@ -129,7 +232,7 @@ pub fn r#move(
                 return Ok(Err(ExitCode(1)));
             }
         };
-    let exact_components = match resolve_commits(
+    let mut exact_components = match resolve_commits(
         effects,
         &repo,
         &mut dag,
@@ -204,6 +307,16 @@ pub fn r#move(
             return Ok(Err(ExitCode(1)));
         }
     };
+
+    if fixup && !exact_components.is_empty() {
+        let mut expanded_components: HashMap<NonZeroOid, CommitSet> = HashMap::new();
+        for (component_root, component) in exact_components.iter() {
+            let expanded =
+                expand_fixup_component_to_dest(&dag, *component_root, component, dest_oid)?;
+            expanded_components.insert(*component_root, expanded);
+        }
+        exact_components = expanded_components;
+    }
 
     let base_oids = if should_sources_default_to_head {
         match head_oid {
