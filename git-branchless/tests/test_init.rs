@@ -51,11 +51,11 @@ echo Hello, world
         let (stdout, stderr) = git.run(&["commit", "--allow-empty", "-m", "test"])?;
         insta::assert_snapshot!(stdout, @"[master 4cd1a9b] test
 ");
-        insta::assert_snapshot!(stderr, @r###"
-        branchless: processing 2 updates: branch master, ref HEAD
+        insta::assert_snapshot!(stderr, @r"
+        branchless: processing 1 update: branch master
         Hello, world
         branchless: processed commit: 4cd1a9b test
-        "###);
+        ");
     }
 
     Ok(())

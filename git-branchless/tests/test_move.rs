@@ -125,6 +125,89 @@ fn test_move_stick() -> eyre::Result<()> {
 }
 
 #[test]
+fn test_move_supports_change_id_prefixes_for_all_revset_flags() -> eyre::Result<()> {
+    let git = make_git()?;
+    git.init_repo()?;
+    git.detach_head()?;
+    git.run(&[
+        "config",
+        "branchless.core.create-jujutsu-change-ids",
+        "true",
+    ])?;
+
+    git.write_file_txt("test1", "contents 1\n")?;
+    git.branchless("record", &["-m", "create test1", "--untracked", "add"])?;
+    git.write_file_txt("test2", "contents 2\n")?;
+    git.branchless("record", &["-m", "create test2", "--untracked", "add"])?;
+    git.write_file_txt("test3", "contents 3\n")?;
+    git.branchless("record", &["-m", "create test3", "--untracked", "add"])?;
+
+    let repo = git.get_repo()?;
+    let source_oid = repo.get_head_info()?.oid.unwrap();
+    let base_oid = repo
+        .find_commit_or_fail(source_oid)?
+        .get_only_parent_oid()
+        .unwrap();
+    let dest_oid = repo
+        .find_commit_or_fail(base_oid)?
+        .get_only_parent_oid()
+        .unwrap();
+
+    let extract_change_id = |oid: lib::git::NonZeroOid| -> eyre::Result<String> {
+        let (stdout, _stderr) = git.run(&["cat-file", "-p", &oid.to_string()])?;
+        let change_id_line = stdout
+            .lines()
+            .find(|line| line.starts_with("change-id "))
+            .ok_or_else(|| eyre::eyre!("missing change-id header for commit {oid}"))?;
+        Ok(change_id_line.trim_start_matches("change-id ").to_string())
+    };
+
+    let source_change_id = extract_change_id(source_oid)?;
+    let base_change_id = extract_change_id(base_oid)?;
+    let dest_change_id = extract_change_id(dest_oid)?;
+
+    let unique_prefix = |target: &str, others: &[&str]| -> String {
+        for len in 1..=target.len() {
+            let prefix = &target[..len];
+            if others.iter().all(|other| !other.starts_with(prefix)) {
+                return prefix.to_string();
+            }
+        }
+        target.to_string()
+    };
+
+    let source_prefix = unique_prefix(&source_change_id, &[&base_change_id, &dest_change_id]);
+    let base_prefix = unique_prefix(&base_change_id, &[&source_change_id, &dest_change_id]);
+    let dest_prefix = unique_prefix(&dest_change_id, &[&source_change_id, &base_change_id]);
+
+    {
+        let git = git.duplicate_repo()?;
+        git.branchless(
+            "move",
+            &["--dry-run", "-s", &source_prefix, "-d", &dest_prefix],
+        )?;
+    }
+
+    {
+        let git = git.duplicate_repo()?;
+        git.branchless(
+            "move",
+            &["--dry-run", "-b", &base_prefix, "-d", &dest_prefix],
+        )?;
+    }
+
+    {
+        let git = git.duplicate_repo()?;
+        git.branchless(
+            "move",
+            &["--dry-run", "-x", &base_prefix, "-d", &dest_prefix],
+        )?;
+    }
+
+    Ok(())
+}
+
+#[test]
 fn test_move_insert_stick() -> eyre::Result<()> {
     let git = make_git()?;
 
@@ -3257,12 +3340,13 @@ fn test_move_branches_after_move() -> eyre::Result<()> {
                 "move",
                 &["--in-memory", "-s", "foo", "-d", &test1_oid.to_string()],
             )?;
-            insta::assert_snapshot!(stderr, @r###"
+            insta::assert_snapshot!(stderr, @"
             branchless: creating working copy snapshot
             Previous HEAD position was f81d55c create test5.txt
+            branchless: processing 1 update: ref HEAD
             Switched to branch 'bar'
             branchless: processing checkout
-            "###);
+            ");
             insta::assert_snapshot!(stdout, @r###"
             Attempting rebase in-memory...
             [1/3] Committed as: 4838e49 create test3.txt
@@ -3464,7 +3548,7 @@ fn test_move_no_reapply_squashed_commits() -> eyre::Result<()> {
                 "move",
                 &["--on-disk", "-b", &test2_oid.to_string(), "-d", "master"],
             )?;
-            insta::assert_snapshot!(stderr, @r###"
+            insta::assert_snapshot!(stderr, @"
             branchless: processing 1 update: ref HEAD
             branchless: processing 1 update: ref HEAD
             Executing: git branchless hook-detect-empty-commit 62fc20d2a290daea0d52bdc2ed2ad4be6491010e
@@ -3474,12 +3558,13 @@ fn test_move_no_reapply_squashed_commits() -> eyre::Result<()> {
             branchless: processing 4 rewritten commits
             branchless: creating working copy snapshot
             branchless: running command: <git-executable> checkout master --
+            branchless: processing 1 update: ref HEAD
             Switched to branch 'master'
             branchless: processing checkout
             :
             @ de4a1fe (> master) squashed test1 and test2
             Successfully rebased and updated detached HEAD.
-            "###);
+            ");
             insta::assert_snapshot!(stdout, @r###"
             hint: you can omit the --dest flag in this case, as it defaults to HEAD
             hint: disable this hint by running: git config --global branchless.hint.moveImplicitHeadArgument false
@@ -3525,11 +3610,12 @@ fn test_move_no_reapply_squashed_commits() -> eyre::Result<()> {
                 "move",
                 &["--in-memory", "-b", &test2_oid.to_string(), "-d", "master"],
             )?;
-            insta::assert_snapshot!(stderr, @r###"
+            insta::assert_snapshot!(stderr, @r"
             branchless: creating working copy snapshot
+            branchless: processing 1 update: ref HEAD
             Switched to branch 'master'
             branchless: processing checkout
-            "###);
+            ");
             insta::assert_snapshot!(stdout, @r###"
             hint: you can omit the --dest flag in this case, as it defaults to HEAD
             hint: disable this hint by running: git config --global branchless.hint.moveImplicitHeadArgument false
@@ -3600,7 +3686,7 @@ fn test_move_delete_checked_out_branch() -> eyre::Result<()> {
             git.run(&["checkout", "work"])?;
             let (stdout, stderr) =
                 git.branchless("move", &["--on-disk", "-b", "HEAD", "-d", "master"])?;
-            insta::assert_snapshot!(stderr, @r###"
+            insta::assert_snapshot!(stderr, @"
             branchless: processing 1 update: ref HEAD
             Executing: git branchless hook-skip-upstream-applied-commit 62fc20d2a290daea0d52bdc2ed2ad4be6491010e
             Executing: git branchless hook-skip-upstream-applied-commit 96d1c37a3d4363611c49f7e52186e189a04c531f
@@ -3612,6 +3698,7 @@ fn test_move_delete_checked_out_branch() -> eyre::Result<()> {
             branchless: creating working copy snapshot
             branchless: running command: <git-executable> checkout master --
             Previous HEAD position was 012efd6 create test3.txt
+            branchless: processing 1 update: ref HEAD
             Switched to branch 'master'
             branchless: processing checkout
             :
@@ -3619,7 +3706,7 @@ fn test_move_delete_checked_out_branch() -> eyre::Result<()> {
             |
             o 012efd6 (more-work) create test3.txt
             Successfully rebased and updated detached HEAD.
-            "###);
+            ");
             insta::assert_snapshot!(stdout, @r###"
             branchless: running command: <git-executable> diff --quiet
             Calling Git for on-disk rebase...
@@ -3645,12 +3732,13 @@ fn test_move_delete_checked_out_branch() -> eyre::Result<()> {
             git.run(&["checkout", "work"])?;
             let (stdout, stderr) =
                 git.branchless("move", &["--in-memory", "-b", "HEAD", "-d", "master"])?;
-            insta::assert_snapshot!(stderr, @r###"
+            insta::assert_snapshot!(stderr, @r"
             branchless: creating working copy snapshot
             Previous HEAD position was 96d1c37 create test2.txt
+            branchless: processing 1 update: ref HEAD
             Switched to branch 'master'
             branchless: processing checkout
-            "###);
+            ");
             insta::assert_snapshot!(stdout, @r###"
             Attempting rebase in-memory...
             [1/3] Skipped commit (was already applied upstream): 62fc20d create test1.txt
@@ -3998,6 +4086,37 @@ fn test_move_merge_commit() -> eyre::Result<()> {
 }
 
 #[test]
+fn test_move_fixup_with_merge_commit_on_disk() -> eyre::Result<()> {
+    let git = make_git()?;
+
+    if !git.supports_reference_transactions()? {
+        return Ok(());
+    }
+    git.init_repo()?;
+
+    git.commit_file("test1", 1)?;
+    git.run(&["checkout", "HEAD^"])?;
+    let test2_oid = git.commit_file("test2", 2)?;
+    git.run(&["checkout", "HEAD^"])?;
+    git.commit_file("test3", 3)?;
+    git.run(&["merge", &test2_oid.to_string()])?;
+
+    let (_stdout, _stderr) = git.branchless(
+        "move",
+        &[
+            "--merge",
+            "--fixup",
+            "-s",
+            &test2_oid.to_string(),
+            "-d",
+            "master",
+        ],
+    )?;
+
+    Ok(())
+}
+
+#[test]
 fn test_move_merge_commit_both_parents() -> eyre::Result<()> {
     let git = make_git()?;
 
@@ -4336,7 +4455,7 @@ fn test_move_orphaned_root() -> eyre::Result<()> {
 
         {
             let (stdout, stderr) = git.branchless("move", &["--on-disk", "-d", "master"])?;
-            insta::assert_snapshot!(stderr, @r###"
+            insta::assert_snapshot!(stderr, @"
             branchless: processing 1 update: ref HEAD
             branchless: processing 1 update: ref HEAD
             Executing: git branchless hook-detect-empty-commit da90168b4835f97f1a10bcc12833140056df9157
@@ -4347,6 +4466,7 @@ fn test_move_orphaned_root() -> eyre::Result<()> {
             branchless: processing 1 update: branch new-root
             branchless: creating working copy snapshot
             branchless: running command: <git-executable> checkout new-root --
+            branchless: processing 1 update: ref HEAD
             Switched to branch 'new-root'
             branchless: processing checkout
             :
@@ -4354,7 +4474,7 @@ fn test_move_orphaned_root() -> eyre::Result<()> {
             |
             @ 70deb1e (> new-root) create test3.txt
             Successfully rebased and updated detached HEAD.
-            "###);
+            ");
             insta::assert_snapshot!(stdout, @r###"
             branchless: running command: <git-executable> diff --quiet
             Calling Git for on-disk rebase...
@@ -4383,12 +4503,13 @@ fn test_move_orphaned_root() -> eyre::Result<()> {
     {
         {
             let (stdout, stderr) = git.branchless("move", &["--in-memory", "-d", "master"])?;
-            insta::assert_snapshot!(stderr, @r###"
+            insta::assert_snapshot!(stderr, @r"
             branchless: creating working copy snapshot
             Previous HEAD position was fc09f3d create test3.txt
+            branchless: processing 1 update: ref HEAD
             Switched to branch 'new-root'
             branchless: processing checkout
-            "###);
+            ");
             insta::assert_snapshot!(stdout, @r###"
             Attempting rebase in-memory...
             [1/2] Skipped now-empty commit: 270b681 new root
@@ -4646,7 +4767,7 @@ fn test_move_branch_on_merge_conflict_resolution() -> eyre::Result<()> {
 
     {
         let (stdout, stderr) = git.run(&["rebase", "--continue"])?;
-        insta::assert_snapshot!(stderr, @r###"
+        insta::assert_snapshot!(stderr, @r"
         branchless: processing 1 update: ref HEAD
         Executing: git branchless hook-detect-empty-commit aec59174640c3e3dbb92fdade0bc44ca31552a85
         Executing: git branchless hook-register-extra-post-rewrite-hook
@@ -4654,6 +4775,7 @@ fn test_move_branch_on_merge_conflict_resolution() -> eyre::Result<()> {
         branchless: creating working copy snapshot
         branchless: running command: <git-executable> checkout master --
         Previous HEAD position was 3632ef4 create test1.txt
+        branchless: processing 1 update: ref HEAD
         Switched to branch 'master'
         branchless: processing checkout
         :
@@ -4663,7 +4785,7 @@ fn test_move_branch_on_merge_conflict_resolution() -> eyre::Result<()> {
         |
         o 3632ef4 create test1.txt
         Successfully rebased and updated detached HEAD.
-        "###);
+        ");
         insta::assert_snapshot!(stdout, @r###"
         [detached HEAD 3632ef4] create test1.txt
          1 file changed, 1 insertion(+), 1 deletion(-)

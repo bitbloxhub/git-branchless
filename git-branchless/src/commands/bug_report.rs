@@ -19,7 +19,7 @@ use lib::core::effects::Effects;
 use lib::core::eventlog::{Event, EventCursor, EventLogDb, EventReplayer};
 use lib::core::formatting::Glyphs;
 use lib::core::node_descriptors::{
-    BranchesDescriptor, CommitMessageDescriptor, CommitOidDescriptor,
+    BranchesDescriptor, ChangeIdDescriptor, CommitMessageDescriptor, CommitOidDescriptor,
     DifferentialRevisionDescriptor, ObsolescenceExplanationDescriptor, Redactor,
     RelativeTimeDescriptor,
 };
@@ -142,6 +142,7 @@ fn describe_event_cursor(
         &commits,
         false,
     )?;
+    let graph_commits = graph.get_commits();
     let graph_lines = render_graph(
         &effects,
         repo,
@@ -150,6 +151,7 @@ fn describe_event_cursor(
         references_snapshot.head_oid,
         &mut [
             &mut CommitOidDescriptor::new(true)?,
+            &mut ChangeIdDescriptor::new(repo, redactor, &graph_commits)?,
             &mut RelativeTimeDescriptor::new(repo, now)?,
             &mut ObsolescenceExplanationDescriptor::new(event_replayer, event_cursor)?,
             &mut BranchesDescriptor::new(repo, head_info, references_snapshot, redactor)?,

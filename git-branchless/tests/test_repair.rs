@@ -80,10 +80,12 @@ fn test_repair_broken_branch() -> eyre::Result<()> {
         git.commit_file("test2", 2)?;
 
         let (stdout, _stderr) = git.branchless("smartlog", &["--event-id=-1"])?;
-        insta::assert_snapshot!(stdout, @r###"
+        insta::assert_snapshot!(stdout, @r"
         :
-        @ 96d1c37 (> master) create test2.txt
-        "###);
+        @ 62fc20d create test1.txt
+        |
+        O 96d1c37 (> master) create test2.txt
+        ");
     }
 
     Ok(())

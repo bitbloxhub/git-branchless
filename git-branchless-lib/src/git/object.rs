@@ -12,7 +12,7 @@ use crate::core::node_descriptors::{
 };
 use crate::git::oid::make_non_zero_oid;
 use crate::git::repo::{Error, Result, Signature};
-use crate::git::{NonZeroOid, Time, Tree};
+use crate::git::{NonZeroOid, Repo, Time, Tree};
 
 use super::MaybeZeroOid;
 
@@ -294,24 +294,70 @@ impl<'repo> Commit<'repo> {
     #[instrument]
     pub fn amend_commit(
         &self,
+        repo: &Repo,
         update_ref: Option<&str>,
         author: Option<&Signature>,
         committer: Option<&Signature>,
         message: Option<&str>,
         tree: Option<&Tree>,
+        extra_headers: Option<Vec<(String, String)>>,
     ) -> Result<NonZeroOid> {
-        let oid = self
-            .inner
-            .amend(
-                update_ref,
-                author.map(|author| &author.inner),
-                committer.map(|committer| &committer.inner),
-                None,
-                message,
-                tree.map(|tree| &tree.inner),
-            )
-            .map_err(Error::Amend)?;
-        Ok(make_non_zero_oid(oid))
+        let oid = repo.create_commit(
+            update_ref,
+            &author.unwrap_or(&self.get_author()),
+            &committer.unwrap_or(&self.get_committer()),
+            &message.unwrap_or(&self.get_message_raw().to_string()),
+            &tree.unwrap_or(&self.get_tree().unwrap()),
+            self.get_parents().iter().collect(),
+            Some(extra_headers.unwrap_or(self.get_custom_headers().unwrap())),
+        )?;
+        Ok(oid)
+    }
+
+    /// Get the custom headers for the commit
+    #[instrument]
+    pub fn get_custom_headers(&self) -> Result<Vec<(String, String)>> {
+        let ignored_headers = [
+            "tree".to_string(),
+            "parent".to_string(),
+            "author".to_string(),
+            "committer".to_string(),
+            "gpgsig".to_string(),
+        ];
+        let raw_headers = self.inner.raw_header().unwrap_or("");
+        let mut parsed = vec![];
+        let mut buf = String::new();
+        let mut flush_header = |buf: &mut String| {
+            if buf.is_empty() {
+                return;
+            }
+            let first_space = buf.chars().position(|c| c == ' ').unwrap_or(0);
+            let buf_split = buf.split_at(first_space);
+            if !ignored_headers.contains(&buf_split.0.trim().to_string()) {
+                parsed.push((
+                    buf_split.0.trim().to_string(),
+                    buf_split.1.trim().to_string(),
+                ));
+            }
+            buf.clear();
+        };
+        for line in raw_headers.split("\n") {
+            if !line.starts_with(" ") {
+                flush_header(&mut buf);
+            }
+            if line.starts_with(" ") {
+                buf.push_str(
+                    line.chars()
+                        .next()
+                        .map(|c| &line[c.len_utf8()..])
+                        .unwrap_or(""),
+                );
+            } else {
+                buf.push_str(line);
+            }
+        }
+        flush_header(&mut buf);
+        Ok(parsed)
     }
 }
 

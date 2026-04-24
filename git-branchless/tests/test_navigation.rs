@@ -852,6 +852,58 @@ fn test_navigation_switch_target_only() -> eyre::Result<()> {
 }
 
 #[test]
+fn test_navigation_switch_change_id_prefix() -> eyre::Result<()> {
+    let git = make_git()?;
+    git.init_repo()?;
+    git.detach_head()?;
+    git.run(&[
+        "config",
+        "branchless.core.create-jujutsu-change-ids",
+        "true",
+    ])?;
+
+    git.write_file_txt("test1", "contents 1\n")?;
+    git.branchless("record", &["-m", "create test1", "--untracked", "add"])?;
+    git.write_file_txt("test2", "contents 2\n")?;
+    git.branchless("record", &["-m", "create test2", "--untracked", "add"])?;
+
+    let target_oid = git
+        .get_repo()?
+        .find_commit_or_fail(git.get_repo()?.get_head_info()?.oid.unwrap())?
+        .get_only_parent_oid()
+        .unwrap();
+    let head_oid = git.get_repo()?.get_head_info()?.oid.unwrap();
+
+    let extract_change_id = |oid: lib::git::NonZeroOid| -> eyre::Result<String> {
+        let (stdout, _stderr) = git.run(&["cat-file", "-p", &oid.to_string()])?;
+        let change_id_line = stdout
+            .lines()
+            .find(|line| line.starts_with("change-id "))
+            .ok_or_else(|| eyre::eyre!("missing change-id header for commit {oid}"))?;
+        Ok(change_id_line.trim_start_matches("change-id ").to_string())
+    };
+
+    let target_change_id = extract_change_id(target_oid)?;
+    let head_change_id = extract_change_id(head_oid)?;
+    let mut prefix_length = 1usize;
+    while prefix_length <= target_change_id.len()
+        && target_change_id
+            .get(..prefix_length)
+            .map(|prefix| head_change_id.starts_with(prefix))
+            .unwrap_or(false)
+    {
+        prefix_length += 1;
+    }
+    let change_id_prefix = target_change_id[..prefix_length].to_string();
+
+    let (stdout, _stderr) = git.branchless("switch", &[&change_id_prefix])?;
+    assert!(stdout.contains(&target_oid.to_string()));
+    assert_eq!(git.get_repo()?.get_head_info()?.oid.unwrap(), target_oid);
+
+    Ok(())
+}
+
+#[test]
 fn test_navigation_switch_revset() -> eyre::Result<()> {
     let git = make_git()?;
     git.init_repo()?;

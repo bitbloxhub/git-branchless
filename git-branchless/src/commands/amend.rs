@@ -97,6 +97,12 @@ pub fn amend(
         err.describe(effects, &repo, &dag)?;
         return Ok(Err(ExitCode(1)));
     };
+    let descendants_to_restack = {
+        let children = dag.query_children(CommitSet::from(head_oid))?;
+        let descendants = dag.query_descendants(children)?;
+        let descendants = dag.filter_visible_commits(descendants)?;
+        dag.commit_set_to_vec(&descendants)?
+    };
 
     let event_tx_id = event_log_db.make_transaction_id(now, "amend")?;
     let (snapshot, status) =
@@ -174,11 +180,13 @@ pub fn amend(
     };
 
     let amended_commit_oid = head_commit.amend_commit(
+        &repo,
         None,
         Some(&author),
         Some(&committer),
         None,
         Some(&amended_tree),
+        None,
     )?;
 
     // Switch to the new commit and move any branches. This is kind of a hack:
@@ -236,14 +244,12 @@ pub fn amend(
             dump_rebase_constraints: move_options.dump_rebase_constraints,
             dump_rebase_plan: move_options.dump_rebase_plan,
         };
-        let children = dag.query_children(CommitSet::from(head_oid))?;
-        let descendants = dag.query_descendants(children)?;
-        let descendants = dag.filter_visible_commits(descendants)?;
-        let commits_to_verify = &descendants;
+        let descendants = descendants_to_restack.clone();
+        let commits_to_verify: CommitSet = descendants.iter().copied().collect();
         let permissions = match RebasePlanPermissions::verify_rewrite_set(
             &dag,
             build_options,
-            commits_to_verify,
+            &commits_to_verify,
         )? {
             Ok(permissions) => permissions,
             Err(err) => {
@@ -253,7 +259,8 @@ pub fn amend(
         };
 
         let mut builder = RebasePlanBuilder::new(&dag, permissions);
-        for descendant_oid in dag.commit_set_to_vec(&descendants)? {
+        builder.replace_commit(head_oid, amended_commit_oid)?;
+        for descendant_oid in descendants {
             let descendant_commit = repo.find_commit_or_fail(descendant_oid)?;
             let parent_oids: Vec<_> = descendant_commit
                 .get_parent_oids()
@@ -271,7 +278,12 @@ pub fn amend(
             // To keep the contents of all descendant commits the same, forcibly
             // replace the children commits, and then rely on normal patch
             // application to apply the rest.
-            if reparent {
+            // Reparent mode keeps descendant commit contents exactly the same,
+            // including merge descendants.
+            // In normal amend mode, merge descendants are recomputed from
+            // rewritten parents.
+            let should_replace_descendant = reparent;
+            if should_replace_descendant {
                 let parents: Vec<_> = parent_oids
                     .into_iter()
                     .map(|parent_oid| repo.find_commit_or_fail(parent_oid))
@@ -290,6 +302,7 @@ pub fn amend(
                     descendant_message,
                     &descendant_commit.get_tree()?,
                     parents.iter().collect(),
+                    None,
                 )?;
                 builder.replace_commit(descendant_oid, reparented_descendant_oid)?;
             }
@@ -314,7 +327,7 @@ pub fn amend(
             force_on_disk: move_options.force_on_disk,
             dry_run: false,
             preserve_timestamps: get_restack_preserve_timestamps(&repo)?,
-            resolve_merge_conflicts: move_options.resolve_merge_conflicts,
+            resolve_merge_conflicts: true,
             check_out_commit_options: CheckOutCommitOptions {
                 additional_args: Default::default(),
                 force_detach: false,

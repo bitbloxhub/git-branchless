@@ -44,14 +44,16 @@ fn test_sync_basic() -> eyre::Result<()> {
 
     {
         let (stdout, stderr) = git.branchless("sync", &[])?;
-        insta::assert_snapshot!(stderr, @r###"
+        insta::assert_snapshot!(stderr, @"
         branchless: creating working copy snapshot
+        branchless: processing 1 update: ref HEAD
         Switched to branch 'master'
         branchless: processing checkout
         branchless: creating working copy snapshot
+        branchless: processing 1 update: ref HEAD
         Switched to branch 'master'
         branchless: processing checkout
-        "###);
+        ");
         insta::assert_snapshot!(stdout, @r###"
         Attempting rebase in-memory...
         [1/2] Committed as: 87c7a36 create test1.txt
@@ -357,7 +359,7 @@ fn test_sync_no_delete_main_branch() -> eyre::Result<()> {
         let (stdout, stderr) = cloned_repo.branchless("sync", &["-p", "--on-disk"])?;
         let stdout = remove_nondeterministic_lines(stdout);
         let stderr = remove_nondeterministic_lines(stderr);
-        insta::assert_snapshot!(stderr, @r###"
+        insta::assert_snapshot!(stderr, @"
         branchless: processing 1 update: ref HEAD
         Executing: git branchless hook-skip-upstream-applied-commit 6ffd720862b7ae71cbe30d66ed27ea8579e24b0f
         Executing: git branchless hook-register-extra-post-rewrite-hook
@@ -365,11 +367,12 @@ fn test_sync_no_delete_main_branch() -> eyre::Result<()> {
         branchless: processing 2 updates: branch master, branch should-be-deleted
         branchless: creating working copy snapshot
         branchless: running command: <git-executable> checkout master --
+        branchless: processing 1 update: ref HEAD
         branchless: processing checkout
         :
         @ 96d1c37 (> master) create test2.txt
         Successfully rebased and updated detached HEAD.
-        "###);
+        ");
         insta::assert_snapshot!(stdout, @r###"
         branchless: running command: <git-executable> fetch --all
         Syncing branch master

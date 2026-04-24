@@ -12,6 +12,7 @@
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fmt::Write;
+use std::io::Write as IoWrite;
 use std::time::SystemTime;
 
 use git_branchless_invoke::CommandContext;
@@ -32,17 +33,18 @@ use lib::core::rewrite::{
 };
 use lib::core::untracked_file_cache::{UntrackedFileStrategy, process_untracked_files};
 use lib::git::{
-    CategorizedReferenceName, FileMode, GitRunInfo, MaybeZeroOid, NonZeroOid, Repo,
+    CategorizedReferenceName, ConfigRead, FileMode, GitRunInfo, MaybeZeroOid, NonZeroOid, Repo,
     ResolvedReferenceInfo, Stage, UpdateIndexCommand, WorkingCopyChangesType, WorkingCopySnapshot,
     process_diff_for_record, summarize_diff_for_temporary_commit, update_index,
 };
-use lib::try_exit_code;
 use lib::util::{ExitCode, EyreExitOr};
+use lib::{reverse_hex, try_exit_code};
 use rayon::ThreadPoolBuilder;
 use scm_record::helpers::CrosstermInput;
 use scm_record::{
     Commit, Event, RecordError, RecordInput, RecordState, Recorder, SelectedContents, TerminalKind,
 };
+use tempfile::NamedTempFile;
 use tracing::{instrument, warn};
 
 /// Commit changes in the working copy.
@@ -93,13 +95,13 @@ fn record(
 ) -> EyreExitOr<()> {
     let now = SystemTime::now();
     let repo = Repo::from_dir(&git_run_info.working_directory)?;
+    let index = repo.get_index()?;
     let conn = repo.get_db_conn()?;
     let event_log_db = EventLogDb::new(&conn)?;
     let event_tx_id = event_log_db.make_transaction_id(now, "record")?;
 
     let (snapshot, working_copy_changes_type, files_to_add) = {
         let head_info = repo.get_head_info()?;
-        let index = repo.get_index()?;
         let (snapshot, _status) =
             repo.get_status(effects, git_run_info, &index, &head_info, Some(event_tx_id))?;
 
@@ -196,6 +198,7 @@ fn record(
             )?);
         }
     } else {
+        let mut extra_header_temp = NamedTempFile::new().unwrap();
         if !files_to_add.is_empty() {
             // call `git add` for the new untracked files to be commited
             //
@@ -261,9 +264,11 @@ fn record(
                 )? {
                     Ok(commit) => commit,
                     Err(ResolveFixupCommitError::NotAnAncestor) => {
-                        writeln!(
-                            effects.get_error_stream(),
-                            "The commit supplied to --fixup must be an ancestor of the commit being created.\nAborting.",
+                        std::fmt::Write::write_str(
+                            &mut effects.get_error_stream(),
+                            &format!(
+                                "The commit supplied to --fixup must be an ancestor of the commit being created.\nAborting.\n"
+                            ),
                         )?;
                         return Ok(Err(ExitCode(1)));
                     }
@@ -271,9 +276,11 @@ fn record(
                         revset_to_fixup,
                         commit_count,
                     }) => {
-                        writeln!(
-                            effects.get_error_stream(),
-                            "--fixup expects exactly 1 commit, but '{revset_to_fixup}' evaluated to {commit_count}.\nAborting.",
+                        std::fmt::Write::write_str(
+                            &mut effects.get_error_stream(),
+                            &format!(
+                                "--fixup expects exactly 1 commit, but '{revset_to_fixup}' evaluated to {commit_count}.\nAborting.\n"
+                            ),
                         )?;
                         return Ok(Err(ExitCode(1)));
                     }
@@ -281,6 +288,20 @@ fn record(
                 let commit = commit.get_oid().to_string();
                 args.extend(["--fixup".to_string(), commit]);
             };
+            let create_jujutsu_change_ids = repo
+                .get_readonly_config()
+                .unwrap()
+                .get_or("branchless.core.create-jujutsu-change-ids", false)
+                .unwrap();
+            if create_jujutsu_change_ids {
+                let change_id_bytes: Vec<u8> = (0..16).map(|_| rand::random::<u8>()).collect();
+                let change_id = reverse_hex::encode_reverse_hex(&change_id_bytes);
+                writeln!(extra_header_temp, "change-id {}", change_id).unwrap();
+                args.extend([
+                    "--extra-commit-header-file".to_string(),
+                    extra_header_temp.path().to_str().unwrap().to_string(),
+                ]);
+            }
             args
         };
         try_exit_code!(git_run_info.run_direct_no_wrapping(Some(event_tx_id), &args)?);

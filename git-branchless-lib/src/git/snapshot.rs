@@ -121,7 +121,12 @@ impl<'repo> WorkingCopySnapshot<'repo> {
         let head_reference_name: Option<ReferenceName> = head_info.reference_name.clone();
 
         let commit_unstaged_oid: NonZeroOid = {
-            Self::create_commit_for_unstaged_changes(repo, head_commit.as_ref(), status_entries)?
+            Self::create_commit_for_unstaged_changes(
+                repo,
+                index,
+                head_commit.as_ref(),
+                status_entries,
+            )?
         };
 
         let commit_stage0 = Self::create_commit_for_stage(
@@ -213,7 +218,7 @@ branchless: automated working copy snapshot
             parents
         };
         let commit_oid =
-            repo.create_commit(None, &signature, &signature, &message, &tree, parents)?;
+            repo.create_commit(None, &signature, &signature, &message, &tree, parents, None)?;
 
         Ok(WorkingCopySnapshot {
             base_commit: repo.find_commit_or_fail(commit_oid)?,
@@ -299,6 +304,7 @@ branchless: automated working copy snapshot
     #[instrument]
     fn create_commit_for_unstaged_changes(
         repo: &Repo,
+        index: &Index,
         head_commit: Option<&Commit>,
         status_entries: &[StatusEntry],
     ) -> eyre::Result<NonZeroOid> {
@@ -342,7 +348,7 @@ branchless: automated working copy snapshot
                     // the index.
                     None
                 } else {
-                    repo.create_blob_from_path(&path)?
+                    repo.create_blob_from_path_for_mode(&path, file_mode, index)?
                         .map(|blob_oid| (blob_oid, file_mode))
                 };
                 result.insert(path, entry);
@@ -370,6 +376,7 @@ branchless: automated working copy snapshot
             &message,
             &tree_unstaged,
             Vec::from_iter(head_commit),
+            None,
         )?;
         Ok(commit)
     }
@@ -460,6 +467,7 @@ branchless: automated working copy snapshot
                 Some(parent_commit) => vec![parent_commit],
                 None => vec![],
             },
+            None,
         )?;
         Ok(commit_oid)
     }

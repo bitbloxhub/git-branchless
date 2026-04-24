@@ -21,11 +21,11 @@ fn test_abandoned_commit_message() -> eyre::Result<()> {
 
     {
         let (_stdout, stderr) = git.run(&["commit", "--amend", "-m", "amend test1"])?;
-        insta::assert_snapshot!(stderr, @r###"
-        branchless: processing 2 updates: branch master, ref HEAD
+        insta::assert_snapshot!(stderr, @r"
+        branchless: processing 1 update: branch master
         branchless: processed commit: 9e8dbe9 amend test1
         branchless: processing 1 rewritten commit
-        "###);
+        ");
     }
 
     git.commit_file("test2", 2)?;
@@ -405,11 +405,12 @@ fn test_symbolic_transaction_ref() -> eyre::Result<()> {
         // An upcoming version post-2.45.x introduces symbolic transaction refs;
         // before the commit that introduces the fix along with this test,
         // they were not properly handled.
-        insta::assert_snapshot!(stderr, @r###"
+        insta::assert_snapshot!(stderr, @r"
         branchless: processing 1 update: branch newbranch
+        branchless: processing 1 update: ref HEAD
         Switched to a new branch 'newbranch'
         branchless: processing checkout
-        "###);
+        ");
     }
 
     Ok(())

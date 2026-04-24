@@ -41,7 +41,7 @@ use lib::core::effects::Effects;
 use lib::core::eventlog::{Event, EventCursor, EventLogDb, EventReplayer, EventTransactionId};
 use lib::core::formatting::{Glyphs, Pluralize, StyledStringBuilder};
 use lib::core::node_descriptors::{
-    BranchesDescriptor, CommitMessageDescriptor, CommitOidDescriptor,
+    BranchesDescriptor, ChangeIdDescriptor, CommitMessageDescriptor, CommitOidDescriptor,
     DifferentialRevisionDescriptor, ObsolescenceExplanationDescriptor, Redactor,
     RelativeTimeDescriptor,
 };
@@ -86,6 +86,7 @@ fn render_cursor_smartlog(
         &commits,
         false,
     )?;
+    let graph_commits = graph.get_commits();
     let result = render_graph(
         effects,
         repo,
@@ -94,6 +95,7 @@ fn render_cursor_smartlog(
         references_snapshot.head_oid,
         &mut [
             &mut CommitOidDescriptor::new(true)?,
+            &mut ChangeIdDescriptor::new(repo, &Redactor::Disabled, &graph_commits)?,
             &mut RelativeTimeDescriptor::new(repo, SystemTime::now())?,
             &mut ObsolescenceExplanationDescriptor::new(event_replayer, event_cursor)?,
             &mut BranchesDescriptor::new(

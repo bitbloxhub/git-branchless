@@ -677,6 +677,7 @@ mod in_memory {
                                 commit_message,
                                 &commit_tree,
                                 vec![&current_commit],
+                                Some(original_commit.get_custom_headers().unwrap()),
                             )
                             .wrap_err("Applying rebased commit")?,
                         );
@@ -809,6 +810,7 @@ mod in_memory {
                             replacement_commit_message,
                             &replacement_tree,
                             parents.iter().collect(),
+                            Some(original_commit.get_custom_headers().unwrap()),
                         )
                         .wrap_err("Applying rebased commit")?;
 
@@ -1099,14 +1101,19 @@ mod on_disk {
             eyre::bail!("Not implemented: replacing commits in an on disk rebase");
         }
 
+        let todo_lines = rebase_plan
+            .commands
+            .iter()
+            .flat_map(|command| command.to_rebase_commands())
+            .collect::<Vec<_>>();
+
         let todo_file_path = rebase_state_dir.join("git-rebase-todo");
         #[allow(clippy::format_collect)]
         std::fs::write(
             &todo_file_path,
-            rebase_plan
-                .commands
+            todo_lines
                 .iter()
-                .map(|command| format!("{}\n", command.to_rebase_command()))
+                .map(|command| format!("{command}\n"))
                 .collect::<String>(),
         )
         .wrap_err_with(|| {
@@ -1117,11 +1124,8 @@ mod on_disk {
         })?;
 
         let end_file_path = rebase_state_dir.join("end");
-        std::fs::write(
-            end_file_path.as_path(),
-            format!("{}\n", rebase_plan.commands.len()),
-        )
-        .wrap_err_with(|| format!("Writing `end` to: {:?}", end_file_path.as_path()))?;
+        std::fs::write(end_file_path.as_path(), format!("{}\n", todo_lines.len()))
+            .wrap_err_with(|| format!("Writing `end` to: {:?}", end_file_path.as_path()))?;
 
         // Corresponds to the `--empty=keep` flag. We'll drop the commits later once
         // we find out that they're empty.
