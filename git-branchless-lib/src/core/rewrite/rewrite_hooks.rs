@@ -11,11 +11,14 @@ use std::time::SystemTime;
 use console::style;
 use eyre::Context;
 use itertools::Itertools;
+use rayon::ThreadPoolBuilder;
 use tempfile::NamedTempFile;
 use tracing::instrument;
 
 use crate::core::check_out::CheckOutCommitOptions;
-use crate::core::config::{Hint, get_hint_enabled, print_hint_suppression_notice};
+use crate::core::config::{
+    Hint, get_hint_enabled, get_restack_preserve_timestamps, print_hint_suppression_notice,
+};
 use crate::core::dag::Dag;
 use crate::core::effects::Effects;
 use crate::core::eventlog::{Event, EventLogDb, EventReplayer};
@@ -27,7 +30,11 @@ use crate::git::{
 };
 
 use super::execute::check_out_updated_head;
-use super::{find_abandoned_children, move_branches};
+use super::{
+    BuildRebasePlanOptions, ExecuteRebasePlanOptions, ExecuteRebasePlanResult,
+    MergeConflictRemediation, RebasePlanBuilder, RebasePlanPermissions, RepoResource,
+    execute_rebase_plan, find_abandoned_children, find_rewrite_target, move_branches,
+};
 
 /// Get the path to the file which stores the list of "deferred commits".
 ///
@@ -161,6 +168,7 @@ pub fn hook_post_rewrite(
         "branchless: processing {message_rewritten_commits}"
     )?;
     event_log_db.add_events(rewrite_events)?;
+    let rewritten_old_commit_oids = rewritten_oids.keys().copied().collect_vec();
 
     if repo
         .get_rebase_state_dir_path()
@@ -191,6 +199,16 @@ pub fn hook_post_rewrite(
         }
     }
 
+    if !is_spurious_event {
+        restack_abandoned_merge_descendants(
+            effects,
+            git_run_info,
+            &repo,
+            &event_log_db,
+            rewritten_old_commit_oids.iter().copied(),
+        )?;
+    }
+
     let should_check_abandoned_commits = get_hint_enabled(&repo, Hint::RestackWarnAbandoned)?;
     if should_check_abandoned_commits && !is_spurious_event {
         let printed_hint = warn_abandoned(
@@ -198,7 +216,7 @@ pub fn hook_post_rewrite(
             &repo,
             &conn,
             &event_log_db,
-            rewritten_oids.keys().copied(),
+            rewritten_old_commit_oids.iter().copied(),
         )?;
         if printed_hint {
             print_hint_suppression_notice(effects, Hint::RestackWarnAbandoned)?;
@@ -206,6 +224,122 @@ pub fn hook_post_rewrite(
     }
 
     Ok(())
+}
+
+#[instrument(skip(old_commit_oids))]
+fn restack_abandoned_merge_descendants(
+    effects: &Effects,
+    git_run_info: &GitRunInfo,
+    repo: &Repo,
+    event_log_db: &EventLogDb,
+    old_commit_oids: impl IntoIterator<Item = NonZeroOid>,
+) -> eyre::Result<()> {
+    let references_snapshot = repo.get_references_snapshot()?;
+    let event_replayer = EventReplayer::from_event_log_db(effects, repo, event_log_db)?;
+    let event_cursor = event_replayer.make_default_cursor();
+    let dag = Dag::open_and_sync(
+        effects,
+        repo,
+        &event_replayer,
+        event_cursor,
+        &references_snapshot,
+    )?;
+
+    let mut merge_rebases: HashMap<NonZeroOid, NonZeroOid> = HashMap::new();
+    for old_commit_oid in old_commit_oids {
+        let abandoned_result =
+            find_abandoned_children(&dag, &event_replayer, event_cursor, old_commit_oid)?;
+        let Some((rewritten_oid, abandoned_children)) = abandoned_result else {
+            continue;
+        };
+        for abandoned_child_oid in abandoned_children {
+            let abandoned_child = repo.find_commit_or_fail(abandoned_child_oid)?;
+            if abandoned_child.get_parent_count() > 1 {
+                merge_rebases
+                    .entry(abandoned_child_oid)
+                    .or_insert(rewritten_oid);
+            }
+        }
+    }
+
+    if merge_rebases.is_empty() {
+        return Ok(());
+    }
+
+    let commits_to_move: crate::core::dag::CommitSet = merge_rebases.keys().copied().collect();
+    let build_options = BuildRebasePlanOptions {
+        force_rewrite_public_commits: true,
+        dump_rebase_constraints: false,
+        dump_rebase_plan: false,
+        detect_duplicate_commits_via_patch_id: true,
+    };
+    let permissions =
+        match RebasePlanPermissions::verify_rewrite_set(&dag, build_options, &commits_to_move)? {
+            Ok(permissions) => permissions,
+            Err(err) => {
+                err.describe(effects, repo, &dag)?;
+                eyre::bail!("Could not auto-restack abandoned merge commits")
+            }
+        };
+    let mut builder = RebasePlanBuilder::new(&dag, permissions);
+    for (abandoned_child_oid, rewritten_oid) in merge_rebases.iter().sorted() {
+        builder.move_subtree(*abandoned_child_oid, vec![*rewritten_oid])?;
+    }
+
+    let pool = ThreadPoolBuilder::new().build()?;
+    let repo_pool = RepoResource::new_pool(repo)?;
+    let rebase_plan = match builder.build(effects, &pool, &repo_pool)? {
+        Ok(Some(rebase_plan)) => rebase_plan,
+        Ok(None) => return Ok(()),
+        Err(err) => {
+            err.describe(effects, repo, &dag)?;
+            eyre::bail!("Could not auto-restack abandoned merge commits")
+        }
+    };
+
+    let now = SystemTime::now();
+    let event_tx_id =
+        event_log_db.make_transaction_id(now, "hook-restack-abandoned-merge-descendants")?;
+    let execute_options = ExecuteRebasePlanOptions {
+        now,
+        event_tx_id,
+        preserve_timestamps: get_restack_preserve_timestamps(repo)?,
+        force_in_memory: false,
+        force_on_disk: false,
+        dry_run: false,
+        resolve_merge_conflicts: true,
+        check_out_commit_options: CheckOutCommitOptions::default(),
+    };
+    match execute_rebase_plan(
+        effects,
+        git_run_info,
+        repo,
+        event_log_db,
+        &rebase_plan,
+        &execute_options,
+    )? {
+        ExecuteRebasePlanResult::Succeeded { rewritten_oids: _ } => {
+            writeln!(
+                effects.get_output_stream(),
+                "branchless: auto-restacked {} abandoned merge {}.",
+                merge_rebases.len(),
+                if merge_rebases.len() == 1 {
+                    "commit"
+                } else {
+                    "commits"
+                }
+            )?;
+            Ok(())
+        }
+        ExecuteRebasePlanResult::WouldSucceed => Ok(()),
+        ExecuteRebasePlanResult::DeclinedToMerge { failed_merge_info } => {
+            failed_merge_info.describe(effects, repo, MergeConflictRemediation::Restack)?;
+            eyre::bail!("Could not auto-restack abandoned merge commits")
+        }
+        ExecuteRebasePlanResult::Failed { exit_code: _ } => {
+            eyre::bail!("Could not auto-restack abandoned merge commits")
+        }
+    }
 }
 
 #[instrument(skip(old_commit_oids))]
@@ -248,6 +382,23 @@ fn warn_abandoned(
         }
         (all_abandoned_children, all_abandoned_branches)
     };
+    let obsolete_commits = dag.query_obsolete_commits();
+    let all_abandoned_children: HashSet<NonZeroOid> = all_abandoned_children
+        .into_iter()
+        .map(|commit_oid| -> eyre::Result<Option<NonZeroOid>> {
+            let is_obsolete = dag.set_contains(&obsolete_commits, commit_oid)?;
+            let is_rewritten =
+                find_rewrite_target(&event_replayer, event_cursor, commit_oid).is_some();
+            Ok(if is_obsolete && !is_rewritten {
+                Some(commit_oid)
+            } else {
+                None
+            })
+        })
+        .collect::<eyre::Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
     let num_abandoned_children = all_abandoned_children.len();
     let num_abandoned_branches = all_abandoned_branches.len();
 
